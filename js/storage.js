@@ -4,7 +4,7 @@
  * 数据（单个 localStorage 键）：
  *   items: 食材记录（fields 为当前字段，revisions 保存每次修改的字段快照）
  *   shopping: 待购补货清单（手动添加或从已吃完/丢弃食材发起；支持家庭认领/转交/取消认领；购买录入保存后才完成并关联新库存）
- *   mealPlans: 用餐计划（名称 + 用餐日期 + 食材快照；完成时复用期限事件写回食材）
+ *   mealPlans: 用餐计划（名称 + 用餐日期 + 食材快照；待用餐可编辑，完成时复用期限事件写回食材）
  *   staples: 常备食材预警（常备数量；在库低于该数量自动生成待购项，买到录入后预警自动解除）
  *   audit: 操作流水（创建/修改/事件/撤销/方案应用/补货/用餐计划/常备预警），永不物理删除
  *
@@ -1278,6 +1278,94 @@
       return plan;
     }
 
+    // 编辑计划（仅待用餐）：名称/用餐日期/食材/就餐成员可改，改完仍是同一条计划
+    // （id、createdAt 不变，不用删掉重建）。已完成的计划是历史记录，不可再改。
+    // 非法输入（空名称/坏日期/空食材）整体拒绝返回 null，原计划不变；
+    // 字段级 from → to 写入 audit（mealplan.update），无实际变更则不写流水。
+    function updateMealPlanImpl(id, fields) {
+      var plan = getMealPlan(id);
+      if (!plan || plan.status !== 'pending') return null;
+      fields = fields || {};
+      var has = function (k) { return Object.prototype.hasOwnProperty.call(fields, k); };
+
+      // 先整体校验并装配新值：任一字段非法，本次编辑全部不生效
+      var next = {};
+      if (has('name')) {
+        next.name = String(fields.name == null ? '' : fields.name).trim().slice(0, 30);
+        if (!next.name) return null;
+      }
+      if (has('date')) {
+        if (!isDateStr(fields.date)) return null;
+        next.date = fields.date;
+      }
+      if (has('items')) {
+        if (!Array.isArray(fields.items)) return null;
+        next.items = fields.items.map(function (pi) {
+          if (!pi || typeof pi.id !== 'string' || !pi.id) return null;
+          return { id: pi.id, name: typeof pi.name === 'string' ? pi.name.slice(0, 30) : '' };
+        }).filter(Boolean);
+        if (!next.items.length) return null; // 计划至少保留 1 样食材
+      }
+      if (has('members')) {
+        if (!Array.isArray(fields.members)) return null;
+        // 与新建同口径：只保留仍存在的成员（id+姓名快照）
+        next.members = fields.members.map(function (mid) {
+          var mb = getMember(mid);
+          return mb ? { id: mb.id, name: mb.name } : null;
+        }).filter(Boolean);
+      }
+      // 冲突确认快照：diet 为 null 表示编辑后已无冲突，清除旧快照
+      var nextDiet;
+      if (has('diet')) {
+        nextDiet = fields.diet == null ? null : {
+          blockers: Array.isArray(fields.diet.blockers) ? fields.diet.blockers : [],
+          warnings: Array.isArray(fields.diet.warnings) ? fields.diet.warnings : [],
+          acknowledgedAt: nowISO()
+        };
+      }
+
+      // 字段级 from → to（食材/成员按 id 序列比较，流水里记名称快照便于阅读）
+      var changes = {};
+      if (next.name !== undefined && next.name !== plan.name) {
+        changes.name = { from: plan.name, to: next.name };
+      }
+      if (next.date !== undefined && next.date !== plan.date) {
+        changes.date = { from: plan.date, to: next.date };
+      }
+      if (next.items && next.items.map(function (pi) { return pi.id; }).join() !==
+          plan.items.map(function (pi) { return pi.id; }).join()) {
+        changes.items = {
+          from: plan.items.map(function (pi) { return pi.name; }),
+          to: next.items.map(function (pi) { return pi.name; })
+        };
+      }
+      if (next.members && next.members.map(function (mb) { return mb.id; }).join() !==
+          (plan.members || []).map(function (mb) { return mb.id; }).join()) {
+        changes.members = {
+          from: (plan.members || []).map(function (mb) { return mb.name; }),
+          to: next.members.map(function (mb) { return mb.name; })
+        };
+      }
+      var dietChanged = has('diet') &&
+        JSON.stringify(nextDiet ? [nextDiet.blockers, nextDiet.warnings] : null) !==
+        JSON.stringify(plan.diet ? [plan.diet.blockers, plan.diet.warnings] : null);
+      if (!Object.keys(changes).length && !dietChanged) return plan; // 无实际变更，不写流水
+
+      if (next.name !== undefined) plan.name = next.name;
+      if (next.date !== undefined) plan.date = next.date;
+      if (next.items) plan.items = next.items;
+      if (next.members) plan.members = next.members;
+      if (has('diet')) {
+        if (nextDiet) plan.diet = nextDiet; else delete plan.diet;
+      }
+      log('mealplan.update', {
+        planId: plan.id, name: plan.name, date: plan.date, changes: changes,
+        dietAck: plan.diet ? { blockers: plan.diet.blockers, warnings: plan.diet.warnings } : null
+      });
+      persist();
+      return plan;
+    }
+
     // 完成计划：actions = { itemId: 'cook'|'consume'|'discard'|'skip' }，
     // 非 skip 的食材写入对应期限事件（source 记 mealplan:<planId>，可在详情时间线撤销），
     // 随后计划置为 done；已删除/已归档（存在 consume/discard 终止事件）的食材自动跳过
@@ -1571,6 +1659,7 @@
     function updateMember(id, patch) { return tx(function () { return updateMemberImpl(id, patch); }); }
     function removeMember(id) { return tx(function () { return removeMemberImpl(id); }); }
     function addMealPlan(fields, source) { return tx(function () { return addMealPlanImpl(fields, source); }); }
+    function updateMealPlan(id, fields) { return tx(function () { return updateMealPlanImpl(id, fields); }); }
     function completeMealPlan(id, actions, at) { return tx(function () { return completeMealPlanImpl(id, actions, at); }); }
     function removeMealPlan(id) { return tx(function () { return removeMealPlanImpl(id); }); }
     function addStaple(fields) { return tx(function () { return addStapleImpl(fields); }); }
@@ -1588,6 +1677,7 @@
       releaseShopping: releaseShopping, listShopMembers: listShopMembers,
       completeShopping: completeShopping, removeShopping: removeShopping, listShopping: listShopping,
       addMealPlan: addMealPlan, getMealPlan: getMealPlan, listMealPlans: listMealPlans,
+      updateMealPlan: updateMealPlan,
       completeMealPlan: completeMealPlan, removeMealPlan: removeMealPlan,
       addMember: addMember, getMember: getMember, findMemberByName: findMemberByName,
       updateMember: updateMember, removeMember: removeMember, listMembers: listMembers,

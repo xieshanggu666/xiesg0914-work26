@@ -27,6 +27,7 @@
 | 家庭共享采购：负责人、备注、待认领/已认领/已购买 | 待购表单可选负责人（留空=待认领）；`claimShopping/transferShopping/releaseShopping`；状态筛选 |
 | 购买后录入、保存成功才完成待购并关联新库存 | `openForm(null, {purchaseShopId})` → 保存时 `completeShopping(id, newItemId)`；取消则待购保留 |
 | 从库存/方案选食材建用餐计划，定日期与名称 | 计划视图新建弹层（库存勾选清单）；方案卡「📅 加入计划」一键带入 |
+| 建立后可改用餐日期、名称和食材，改完仍是同一条计划 | 计划卡「编辑」复用同一弹层预填；`storage.updateMealPlan(id, fields)` 仅待用餐可改，字段级 from → to 入 `audit`（`mealplan.update`），id/createdAt 不变 |
 | 展示食材在计划日的预计状态，临期/过期给调整提示 | 引擎 `assess(item, 计划日)` 快进评估 + `planAdjustment()` 纯函数；表单预览与计划卡片同步展示 |
 | 计划清单按日期排列，可标记完成、跳转食材详情 | `storage.listMealPlans()`（待用餐按日期升序）；计划卡食材标签点击进详情 |
 | 完成时沿用做熟/吃完/丢弃事件记录 | `completeMealPlan(id, actions)` 逐样调用现有 `addEvent`（source 记 `mealplan:<id>`，可撤销） |
@@ -326,10 +327,17 @@ localStorage 单键 `freshkeeper:v1`：
 3. **按日期排列的计划清单**：待用餐按用餐日期升序（最近的在前，并标注
    今天/明天/N 天后/已过期 N 天），已完成按完成时间倒序；
    食材标签可点击跳转食材详情，底部导航角标显示待用餐数量。
-4. **完成即事件记录**：`completeMealPlan(id, actions)` 对每样食材沿用现有
+4. **建立后可编辑**：待用餐计划可改名称、用餐日期、食材与就餐成员——
+   `updateMealPlan(id, fields)` 只改字段不重建议（id、createdAt 不变），
+   非法输入（空名称/坏日期/空食材）整体拒绝、原计划不变；
+   编辑弹层与新建共用，计划里已归档/已删除的食材追加为可取消勾选的行，
+   避免保存时被静默丢掉；冲突确认快照随编辑更新（无冲突则清除）；
+   字段级 from → to 写入 `mealplan.update` 流水，无实际变更不写流水。
+   已完成的计划是历史记录，不可再改。
+5. **完成即事件记录**：`completeMealPlan(id, actions)` 对每样食材沿用现有
    `addEvent` 写入 做熟/吃完/丢弃（`source` 记 `mealplan:<planId>`，
    详情时间线标注“来自用餐计划”且可撤销），已删除/已归档食材自动跳过；
-   计划置 `done/doneAt`，`mealplan.add/complete/remove` 与每条事件全部入 `audit`。
+   计划置 `done/doneAt`，`mealplan.add/update/complete/remove` 与每条事件全部入 `audit`。
 
 ### 5.4 家庭成员饮食偏好与忌口/过敏模型
 

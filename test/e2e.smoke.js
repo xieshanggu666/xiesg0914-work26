@@ -446,6 +446,30 @@ function check(name, cond) {
   check('方案带入的计划创建成功（待用餐 2 条）', window.__store.listMealPlans('pending').length === 2);
   check('带入计划标注来自方案', /来自方案/.test($('#mealPlanList').textContent));
 
+  // 9c-2b. 编辑待用餐计划：改名称/日期/食材后仍是同一条计划（id 不变，不用删掉重建）
+  const editTarget = window.__store.listMealPlans('pending').find(p => p.source === 'plan');
+  const origItemCount = editTarget.items.length; // 注意：listMealPlans 返回的是活引用，需先取旧值
+  const editCard = $$('#mealPlanList .shop-card').find(c => c.textContent.includes('来自方案'));
+  editCard.querySelector('[data-meal-edit]').click();
+  check('编辑弹层打开且标题为编辑', !$('#sheetMealPlan').hidden && $('#mealFormTitle').textContent === '编辑用餐计划');
+  check('编辑预填原名称与日期', $('#mName').value === editTarget.name && $('#mDate').value === editTarget.date);
+  check('编辑预勾选原食材', $$('#mPickList input:checked').length === origItemCount);
+  const plus6 = (() => { const d = new Date(); d.setDate(d.getDate() + 6);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); })();
+  $('#mName').value = '改后的团圆饭';
+  $('#mDate').value = plus6;
+  fire($('#mDate'), 'change');
+  const extraCb = $$('#mPickList input[type=checkbox]').find(cb => !cb.checked);
+  extraCb.checked = true;
+  fire(extraCb, 'change');
+  fire($('#mealPlanForm'), 'submit');
+  check('编辑保存后弹层关闭', $('#sheetMealPlan').hidden === true);
+  const afterEdit = window.__store.getMealPlan(editTarget.id);
+  check('改完仍是同一条计划（id 不变）', !!afterEdit && afterEdit.name === '改后的团圆饭' && afterEdit.date === plus6);
+  check('食材随编辑增加', afterEdit.items.length === origItemCount + 1);
+  check('不产生新计划（待用餐仍 2 条）', window.__store.listMealPlans('pending').length === 2);
+  check('计划清单显示改后的名称与日期', /改后的团圆饭/.test($('#mealPlanList').textContent) && /6 天后/.test($('#mealPlanList').textContent));
+
   // 9c-3. 标记完成：菠菜改记“做熟”，豆腐保持默认“吃完”
   const targetPlanCard = $$('#mealPlanList .shop-card').find(c => c.textContent.includes('周末测试晚餐'));
   targetPlanCard.querySelector('[data-meal-done]').click();
@@ -485,6 +509,7 @@ function check(name, cond) {
   $$('.tab[data-view]').find(t => t.dataset.view === 'history').click();
   const mealAudit = $('#auditList').textContent;
   check('追溯包含新建用餐计划', /新建用餐计划/.test(mealAudit));
+  check('追溯包含修改用餐计划及字段级变更', /修改用餐计划/.test(mealAudit) && /→ 改后的团圆饭/.test(mealAudit));
   check('追溯包含完成用餐计划及事件明细', /完成用餐计划/.test(mealAudit) && /菠菜·已做熟|菠菜·做熟/.test(mealAudit));
   check('追溯包含删除用餐计划', /删除用餐计划/.test(mealAudit));
 

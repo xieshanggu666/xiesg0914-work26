@@ -158,6 +158,123 @@ test('删除计划：removeMealPlan 写审计，不影响食材', () => {
   assert.equal(st.listItems().length, 1, '食材库存不受影响');
 });
 
+// ---------- 编辑计划（改完仍是同一条计划，不用删掉重建） ----------
+test('编辑计划：改名称/日期/食材后 id 与创建时间不变，审计记 from→to', () => {
+  const st = Storage.createStore(memBackend());
+  const a = st.addItem(SPINACH);
+  const b = st.addItem(TOFU);
+  const c = st.addItem(SALMON);
+  const plan = st.addMealPlan({ name: '周五晚餐', date: D(2), items: [{ id: a.id, name: a.name }, { id: b.id, name: b.name }] });
+  const createdAt = plan.createdAt;
+
+  const updated = st.updateMealPlan(plan.id, {
+    name: '周六火锅', date: D(3),
+    items: [{ id: a.id, name: a.name }, { id: c.id, name: c.name }]
+  });
+  assert.ok(updated, '编辑成功');
+  assert.equal(updated.id, plan.id, '仍是同一条计划');
+  assert.equal(updated.createdAt, createdAt, '创建时间不变');
+  assert.equal(updated.status, 'pending', '状态仍是待用餐');
+  assert.equal(st.getMealPlan(plan.id).name, '周六火锅');
+  assert.equal(st.getMealPlan(plan.id).date, D(3));
+  assert.deepEqual(st.getMealPlan(plan.id).items.map(pi => pi.id), [a.id, c.id]);
+
+  const entry = st.auditEntries().find(e => e.action === 'mealplan.update');
+  assert.ok(entry, '编辑入审计');
+  assert.deepEqual(entry.detail.changes.name, { from: '周五晚餐', to: '周六火锅' });
+  assert.deepEqual(entry.detail.changes.date, { from: D(2), to: D(3) });
+  assert.deepEqual(entry.detail.changes.items.from, ['菠菜', '豆腐']);
+  assert.deepEqual(entry.detail.changes.items.to, ['菠菜', '三文鱼']);
+  assert.equal(st.listMealPlans().length, 1, '不产生新计划');
+});
+
+test('编辑计划：只改日期后清单按新日期重新排序', () => {
+  const st = Storage.createStore(memBackend());
+  const it = st.addItem(SPINACH);
+  const mk = (name, date) => st.addMealPlan({ name, date, items: [{ id: it.id, name: it.name }] });
+  const p1 = mk('原计划后天的', D(2));
+  mk('明天的', D(1));
+  assert.deepEqual(st.listMealPlans('pending').map(p => p.name), ['明天的', '原计划后天的']);
+  st.updateMealPlan(p1.id, { date: D(0) });
+  assert.deepEqual(st.listMealPlans('pending').map(p => p.name), ['原计划后天的', '明天的'],
+    '改早后排到最前');
+});
+
+test('编辑计划：无实际变更不写审计流水', () => {
+  const st = Storage.createStore(memBackend());
+  const it = st.addItem(SPINACH);
+  const plan = st.addMealPlan({ name: '不变', date: D(1), items: [{ id: it.id, name: it.name }] });
+  const before = st.auditEntries().length;
+  const same = st.updateMealPlan(plan.id, { name: '不变', date: D(1), items: [{ id: it.id, name: it.name }] });
+  assert.ok(same, '幂等保存仍返回计划');
+  assert.equal(st.auditEntries().length, before, '没有变更就不写流水');
+});
+
+test('编辑计划：已完成/不存在的计划拒绝编辑', () => {
+  const st = Storage.createStore(memBackend());
+  const it = st.addItem(SPINACH);
+  const plan = st.addMealPlan({ name: '已完成的', date: D(1), items: [{ id: it.id, name: it.name }] });
+  st.completeMealPlan(plan.id, { [it.id]: 'consume' });
+  assert.equal(st.updateMealPlan(plan.id, { name: '想改名' }), null, '已完成计划是历史记录，不可改');
+  assert.equal(st.getMealPlan(plan.id).name, '已完成的');
+  assert.equal(st.updateMealPlan('mp-不存在', { name: 'x' }), null, '不存在的计划返回 null');
+  assert.equal(st.auditEntries().some(e => e.action === 'mealplan.update'), false, '拒绝时不写流水');
+});
+
+test('编辑计划：非法输入整体拒绝，原计划不变', () => {
+  const st = Storage.createStore(memBackend());
+  const it = st.addItem(SPINACH);
+  const plan = st.addMealPlan({ name: '原计划', date: D(1), items: [{ id: it.id, name: it.name }] });
+  assert.equal(st.updateMealPlan(plan.id, { name: '   ' }), null, '空名称拒绝');
+  assert.equal(st.updateMealPlan(plan.id, { date: '明天' }), null, '坏日期拒绝');
+  assert.equal(st.updateMealPlan(plan.id, { items: [] }), null, '空食材拒绝');
+  assert.equal(st.updateMealPlan(plan.id, { items: '菠菜' }), null, 'items 非数组拒绝');
+  assert.equal(st.updateMealPlan(plan.id, { items: [{ name: '没id' }] }), null, '食材缺 id 拒绝');
+  const cur = st.getMealPlan(plan.id);
+  assert.equal(cur.name, '原计划');
+  assert.equal(cur.date, D(1));
+  assert.equal(cur.items.length, 1);
+});
+
+test('编辑计划：成员快照随编辑更新，已删除成员被过滤', () => {
+  const st = Storage.createStore(memBackend());
+  const it = st.addItem(SPINACH);
+  const m1 = st.addMember({ name: '妈妈' });
+  const m2 = st.addMember({ name: '爸爸' });
+  const plan = st.addMealPlan({ name: '家宴', date: D(1), items: [{ id: it.id, name: it.name }], members: [m1.id] });
+  assert.equal(st.getMealPlan(plan.id).members.length, 1);
+
+  st.removeMember(m2.id); // 先删掉爸爸，再把他加进计划也不生效
+  const before = st.auditEntries().length;
+  const updated = st.updateMealPlan(plan.id, { members: [m1.id, m2.id] });
+  assert.deepEqual(updated.members.map(mb => mb.id), [m1.id], '已删除成员不进快照');
+  assert.equal(st.auditEntries().length, before, '成员集合实际没变就不写流水');
+
+  st.updateMealPlan(plan.id, { members: [] });
+  assert.deepEqual(st.getMealPlan(plan.id).members, [], '可以清空就餐成员');
+  const entry = st.auditEntries().find(e => e.action === 'mealplan.update');
+  assert.deepEqual(entry.detail.changes.members, { from: ['妈妈'], to: [] }, '成员变更记名称快照');
+});
+
+test('编辑计划：冲突确认快照可更新，无冲突时清除', () => {
+  const st = Storage.createStore(memBackend());
+  const it = st.addItem(SPINACH);
+  const plan = st.addMealPlan({
+    name: '海鲜局', date: D(1), items: [{ id: it.id, name: it.name }],
+    diet: { blockers: ['妈妈：水产'], warnings: [] }
+  });
+  assert.ok(st.getMealPlan(plan.id).diet, '创建时带确认快照');
+
+  const acked = st.updateMealPlan(plan.id, { diet: { blockers: [], warnings: ['爸爸：香菜'] } });
+  assert.deepEqual(acked.diet.warnings, ['爸爸：香菜'], '快照随编辑更新');
+  assert.ok(acked.diet.acknowledgedAt);
+
+  const cleared = st.updateMealPlan(plan.id, { diet: null });
+  assert.equal(cleared.diet, undefined, '编辑后无冲突则清除旧快照');
+  const entry = st.auditEntries().find(e => e.action === 'mealplan.update' && e.detail.dietAck === null);
+  assert.ok(entry, '清除快照也入审计');
+});
+
 // ---------- 导入导出 / 迁移 ----------
 test('用餐计划随导出/合并导入往返；重复 ID 拒绝合并', () => {
   const st = Storage.createStore(memBackend());

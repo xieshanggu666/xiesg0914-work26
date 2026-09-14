@@ -69,6 +69,7 @@
     mealFilter: 'pending',
     mealPresetIds: null,   // 从方案页带入的预勾选食材
     mealPresetSource: null,// 计划来源：方案页带入为 plan
+    mealEditId: null,      // 正在编辑的用餐计划（null=新建；编辑改的是同一条计划）
     mealDonePlanId: null,  // 正在完成哪条用餐计划
     mealDoneActions: {},   // 完成弹层中每样食材选定的处理动作
     planDinerIds: [],      // 方案页选中的就餐成员（本机记忆）
@@ -1830,10 +1831,31 @@
   // preset: { name, itemIds, source, memberIds }（从方案页一键带入）
   function openMealPlanForm(preset) {
     preset = preset || {};
+    state.mealEditId = null;
     state.mealPresetIds = preset.itemIds || null;
     state.mealDinerIds = (preset.memberIds || getSavedDiners()).slice();
+    $('#mealFormTitle').textContent = '新建用餐计划';
+    $('#mSubmit').textContent = '确认计划';
     $('#mName').value = preset.name || defaultMealName(todayISO());
     $('#mDate').value = preset.date || todayISO();
+    renderMealDinerBar();
+    renderMealPickList();
+    renderMealPreview();
+    $('#sheetMealPlan').hidden = false;
+  }
+
+  // 编辑已有计划：同一个弹层预填名称/日期/食材/成员，保存时改的还是同一条计划
+  function openMealPlanEdit(planId) {
+    var plan = store.getMealPlan(planId);
+    if (!plan || plan.status !== 'pending') return;
+    state.mealEditId = planId;
+    state.mealPresetSource = null;
+    state.mealPresetIds = plan.items.map(function (pi) { return pi.id; });
+    state.mealDinerIds = (plan.members || []).map(function (mb) { return mb.id; });
+    $('#mealFormTitle').textContent = '编辑用餐计划';
+    $('#mSubmit').textContent = '保存修改';
+    $('#mName').value = plan.name;
+    $('#mDate').value = plan.date;
     renderMealDinerBar();
     renderMealPickList();
     renderMealPreview();
@@ -1877,7 +1899,26 @@
       });
     }
     var root = $('#mPickList');
-    if (!active.length) {
+    // 编辑时，计划里已归档/已删除的食材不在在库清单中：追加为可取消勾选的行，
+    // 避免用户没注意到、保存时被静默丢掉
+    var extraRows = '';
+    if (state.mealEditId) {
+      var editPlan = store.getMealPlan(state.mealEditId);
+      var activeIds = {};
+      active.forEach(function (a) { activeIds[a.item.id] = true; });
+      if (editPlan) {
+        extraRows = editPlan.items.filter(function (pi) { return !activeIds[pi.id]; }).map(function (pi) {
+          var it = store.getItem(pi.id);
+          var note = !it || it.removed ? '记录已删除' : '已归档';
+          return '<label class="meal-pick-row">' +
+            '<input type="checkbox" data-id="' + esc(pi.id) + '" checked>' +
+            '<span class="mp-name">' + esc(pi.name) + '</span>' +
+            '<span class="mp-meta">' + note + '，取消勾选可从计划移除</span>' +
+          '</label>';
+        }).join('');
+      }
+    }
+    if (!active.length && !extraRows) {
       root.innerHTML = '<p class="hint" style="padding:10px 12px;margin:0">库存里没有在库的食材，请先录入。</p>';
       return;
     }
@@ -1892,7 +1933,7 @@
         '<span class="status-pill sp-' + a.status + '">' + esc(a.statusInfo.label) + '</span>' +
         '<span class="mp-meta">' + esc(daysText(a)) + '</span>' +
       '</label>';
-    }).join('');
+    }).join('') + extraRows;
   }
 
   function checkedMealIds() {
@@ -1977,26 +2018,31 @@
         eval: diet,
         targets: function () { return mealDietTargets(checkedMealIds()); },
         onDone: function (finalEval, ackBlockers, ackWarnings) {
-          return doCreateMealPlan(name, date, finalEval, ackBlockers, ackWarnings);
+          return doSaveMealPlan(name, date, finalEval, ackBlockers, ackWarnings);
         }
       });
       return;
     }
-    doCreateMealPlan(name, date, diet, [], []);
+    doSaveMealPlan(name, date, diet, [], []);
   }
 
-  // 实际创建（无冲突，或冲突已在解决弹层处理）；成员与冲突确认快照随计划保存
-  function doCreateMealPlan(name, date, dietEval, ackBlockers, ackWarnings) {
+  // 实际保存（无冲突，或冲突已在解决弹层处理）；成员与冲突确认快照随计划保存。
+  // 编辑模式改的是同一条计划（id 不变），不用删掉重建。
+  function doSaveMealPlan(name, date, dietEval, ackBlockers, ackWarnings) {
+    var editPlan = state.mealEditId ? store.getMealPlan(state.mealEditId) : null;
     var ids = checkedMealIds();
     var items = ids.map(function (id) {
       var it = store.getItem(id);
-      return it ? { id: it.id, name: it.name } : null;
+      if (it) return { id: it.id, name: it.name };
+      // 食材记录已被物理清走（极端情况）：沿用计划里的名称快照，不把食材弄丢
+      var pi = editPlan && editPlan.items.filter(function (x) { return x.id === id; })[0];
+      return pi ? { id: pi.id, name: pi.name } : null;
     }).filter(Boolean);
     if (!items.length) { toast('请至少选择 1 样食材'); return false; }
-    var source = state.mealPresetSource || 'manual';
     var fields = {
       name: name, date: date, items: items,
-      members: state.mealDinerIds.slice()
+      members: state.mealDinerIds.slice(),
+      diet: null // 无冲突时清除旧的确认快照；有冲突下面覆盖（新建时存储层忽略 null）
     };
     if (dietEval && dietEval.hasConflict) {
       var ack = dietAckFromEvaluation(dietEval);
@@ -2005,6 +2051,18 @@
         warnings: (ackWarnings && ackWarnings.length) ? ackWarnings : ack.warnings
       };
     }
+    if (editPlan) {
+      var upRes = guard(function () { return store.updateMealPlan(editPlan.id, fields); });
+      if (!upRes.ok) return false; // 保存失败：弹层保留，失败提示已弹出
+      if (!upRes.value) { toast('该计划已完成或已删除，无法编辑'); return false; }
+      state.mealEditId = null;
+      state.mealPresetIds = null;
+      closeSheet('sheetMealPlan');
+      toast('已保存修改：' + name);
+      renderAll();
+      return true;
+    }
+    var source = state.mealPresetSource || 'manual';
     var createRes = guard(function () { return store.addMealPlan(fields, source); });
     if (!createRes.ok) return false; // 保存失败：冲突弹层保留，失败提示已弹出
     state.mealPresetSource = null;
@@ -2112,6 +2170,7 @@
         (isDone ? '' :
           '<div class="shop-actions">' +
             '<button class="btn-primary" data-meal-done="' + esc(plan.id) + '">标记完成</button>' +
+            '<button class="btn-ghost" data-meal-edit="' + esc(plan.id) + '">编辑</button>' +
             '<button class="btn-ghost danger" data-meal-del="' + esc(plan.id) + '">删除</button>' +
           '</div>') +
       '</div>';
@@ -2119,6 +2178,9 @@
 
     $$('#mealPlanList [data-meal-done]').forEach(function (b) {
       b.addEventListener('click', function () { openMealDone(b.getAttribute('data-meal-done')); });
+    });
+    $$('#mealPlanList [data-meal-edit]').forEach(function (b) {
+      b.addEventListener('click', function () { openMealPlanEdit(b.getAttribute('data-meal-edit')); });
     });
     $$('#mealPlanList [data-meal-del]').forEach(function (b) {
       b.addEventListener('click', function () {
@@ -2219,6 +2281,7 @@
     'shopping.complete': ['完成补货', 'a-shop', '✅'],
     'shopping.remove': ['删除待购', 'a-remove', '🧹'],
     'mealplan.add': ['新建用餐计划', 'a-plan', '📅'],
+    'mealplan.update': ['修改用餐计划', 'a-update', '✏️'],
     'mealplan.complete': ['完成用餐计划', 'a-plan', '🍽️'],
     'mealplan.remove': ['删除用餐计划', 'a-remove', '🧹'],
     'staple.add': ['设置常备预警', 'a-shop', '🔔'],
@@ -2301,7 +2364,15 @@
           lines.push((SHOP_LABELS[k] || k) + '：' + esc(short(c.from)) + ' → ' + esc(short(c.to)));
         });
       }
-      if (d.changes && e.action !== 'shopping.update') {
+      if (e.action === 'mealplan.update' && d.changes) {
+        var MP_LABELS = { name: '名称', date: '用餐日期', items: '食材', members: '就餐成员' };
+        Object.keys(d.changes).forEach(function (k) {
+          var c = d.changes[k];
+          var fmt = function (v) { return Array.isArray(v) ? (v.join('、') || '（无）') : short(v); };
+          lines.push((MP_LABELS[k] || k) + '：' + esc(fmt(c.from)) + ' → ' + esc(fmt(c.to)));
+        });
+      }
+      if (d.changes && e.action !== 'shopping.update' && e.action !== 'mealplan.update') {
         var LABELS = { name: '名称', categoryId: '分类', purchaseDate: '购买日期', packageType: '包装', location: '位置', note: '备注', minQty: '常备数量' };
         Object.keys(d.changes).forEach(function (k) {
           var c = d.changes[k];
