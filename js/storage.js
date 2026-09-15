@@ -63,10 +63,32 @@
   var SHOP_OPEN_STATUSES = ['unclaimed', 'claimed'];
   // 饮食标签三类：过敏（阻断）/ 忌口（警告）/ 偏好（正向提示）
   var DIET_KINDS = ['allergy', 'avoid', 'prefer'];
-  var DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  var DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
+  // 真实日历校验：2月30日、4月31日这类“格式对但不存在”的日期一律非法
+  // （Date 构造会把它们溢出成下个月某天，回读年月日即可识破）
   function isDateStr(v) {
-    return typeof v === 'string' && DATE_RE.test(v) && !isNaN(new Date(v + 'T12:00:00').getTime());
+    if (typeof v !== 'string') return false;
+    var m = DATE_RE.exec(v);
+    if (!m) return false;
+    var y = +m[1], mo = +m[2], d = +m[3];
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return false;
+    var dt = new Date(Date.UTC(y, mo - 1, d));
+    return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+  }
+
+  // 宽松加载旧数据时的“改正”兜底：把不存在的日期夹到当月最后一天
+  // （2026-02-30 → 2026-02-28、2026-04-31 → 2026-04-30），保住记录本身；
+  // 月份越界（如 13 月）/日号为 0 等无法合理改正的返回 null，由调用方按原规则跳过
+  function clampDateStr(v) {
+    if (typeof v !== 'string') return null;
+    var m = DATE_RE.exec(v);
+    if (!m) return null;
+    var y = +m[1], mo = +m[2], d = +m[3];
+    if (y < 1000 || mo < 1 || mo > 12 || d < 1) return null;
+    var last = new Date(y, mo, 0).getDate(); // 次月第 0 天 = 当月最后一天
+    var dd = Math.min(d, last);
+    return y + '-' + String(mo).padStart(2, '0') + '-' + String(dd).padStart(2, '0');
   }
   function isPlainObject(v) {
     return Object.prototype.toString.call(v) === '[object Object]';
@@ -87,9 +109,16 @@
       if (!lenient) errors.push(where + '缺少名称（name）');
       return null;
     }
-    if (!isDateStr(raw.purchaseDate)) {
-      if (!lenient) errors.push(where + '「' + raw.name + '」缺少合法购买日期（YYYY-MM-DD）');
-      return null;
+    var purchaseDate = raw.purchaseDate;
+    if (!isDateStr(purchaseDate)) {
+      // 宽松加载：2月30日 这类不存在的日期改正为当月最后一天，保住记录；
+      // 无法合理改正的才按原规则处理（严格导入报错拒绝 / 宽松加载丢弃该条）
+      var fixedPd = lenient ? clampDateStr(purchaseDate) : null;
+      if (!fixedPd) {
+        if (!lenient) errors.push(where + '「' + raw.name + '」缺少合法购买日期（YYYY-MM-DD）');
+        return null;
+      }
+      purchaseDate = fixedPd;
     }
     // 加载旧数据时对非法位置/包装做兜底；导入时严格拒绝
     var loc = LOCATIONS.indexOf(raw.location) >= 0 ? raw.location : (lenient ? 'fridge' : null);
@@ -101,7 +130,7 @@
       id: (typeof raw.id === 'string' && raw.id) ? raw.id : uid('it'),
       name: raw.name.trim().slice(0, 30),
       categoryId: typeof raw.categoryId === 'string' ? raw.categoryId : '',
-      purchaseDate: raw.purchaseDate,
+      purchaseDate: purchaseDate,
       packageType: pkg,
       location: loc,
       note: typeof raw.note === 'string' ? raw.note.slice(0, 200) : '',
@@ -126,16 +155,22 @@
         if (!lenient) errors.push(where + '「' + item.name + '」存在不支持的事件类型：' + ev.type);
         return;
       }
-      if (!isDateStr(ev.at)) {
-        if (!lenient) errors.push(where + '「' + item.name + '」的「' + ev.type + '」事件缺少合法日期');
-        return;
+      var evAt = ev.at;
+      if (!isDateStr(evAt)) {
+        // 与购买日期同一口径：宽松加载改正到当月最后一天，避免丢弃事件改变归档结论
+        var fixedAt = lenient ? clampDateStr(evAt) : null;
+        if (!fixedAt) {
+          if (!lenient) errors.push(where + '「' + item.name + '」的「' + ev.type + '」事件缺少合法日期');
+          return;
+        }
+        evAt = fixedAt;
       }
       validIdx++;
       var clean = {
         id: (typeof ev.id === 'string' && ev.id) ? ev.id : uid('ev'),
         // 保留原序号；历史数据无 seq 时按文件中的先后次序补号，并避开已有序号，保证同一天事件次序稳定
         seq: Number.isFinite(ev.seq) ? ev.seq : Math.max(maxSeq, 0) + validIdx,
-        type: ev.type, at: ev.at,
+        type: ev.type, at: evAt,
         deleted: !!ev.deleted
       };
       if (clean.deleted) clean.deletedAt = ev.deletedAt || nowISO();
@@ -245,9 +280,15 @@
       if (!lenient) errors.push(where + '缺少计划名称（name）');
       return null;
     }
-    if (!isDateStr(raw.date)) {
-      if (!lenient) errors.push(where + '「' + raw.name + '」缺少合法用餐日期（YYYY-MM-DD）');
-      return null;
+    var planDate = raw.date;
+    if (!isDateStr(planDate)) {
+      // 宽松加载：不存在的用餐日期（如 2月30日）改正为当月最后一天，保住计划
+      var fixedDate = lenient ? clampDateStr(planDate) : null;
+      if (!fixedDate) {
+        if (!lenient) errors.push(where + '「' + raw.name + '」缺少合法用餐日期（YYYY-MM-DD）');
+        return null;
+      }
+      planDate = fixedDate;
     }
     var rawItems = Array.isArray(raw.items) ? raw.items
       : (raw.items == null ? [] : (lenient ? [] : null));
@@ -280,7 +321,7 @@
     var plan = {
       id: (typeof raw.id === 'string' && raw.id) ? raw.id : uid('mp'),
       name: raw.name.trim().slice(0, 30),
-      date: raw.date,
+      date: planDate,
       items: items,
       members: members,
       status: status,
@@ -1238,6 +1279,11 @@
     }
 
     function addMealPlanImpl(fields, source) {
+      // 与编辑同一口径的硬校验：名称不能为空，用餐日期必须是真实存在的日历日
+      // （2月30日、4月31日 这类不存在的日期拒绝入库，防止引擎按溢出后的另一天计算）
+      var name = String(fields && fields.name != null ? fields.name : '').trim();
+      if (!name) return null;
+      if (!isDateStr(fields && fields.date)) return null;
       var items = (Array.isArray(fields.items) ? fields.items : []).map(function (pi) {
         return { id: pi.id, name: typeof pi.name === 'string' ? pi.name : '' };
       });
@@ -1248,7 +1294,7 @@
       }).filter(Boolean);
       var plan = {
         id: uid('mp'),
-        name: (fields.name || '').trim(),
+        name: name,
         date: fields.date,
         items: items,
         members: members,

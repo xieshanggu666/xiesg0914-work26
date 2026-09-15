@@ -55,6 +55,39 @@ test('畸形事件/修订结构被拒绝（不静默吞掉）', () => {
   assert.throws(() => st.importJSON({ items: [Object.assign({}, VALID_ITEM, { revisions: {} })] }, true), /revisions/);
 });
 
+test('严格导入：不存在的日历日期（2月30日/4月31日/平年2月29日）整体拒绝', () => {
+  const st = Storage.createStore(memBackend());
+  assert.throws(() => st.importJSON({ items: [Object.assign({}, VALID_ITEM, { purchaseDate: '2026-02-30' })] }, true), /日期/);
+  assert.throws(() => st.importJSON({ items: [Object.assign({}, VALID_ITEM, { purchaseDate: '2026-04-31' })] }, true), /日期/);
+  assert.throws(() => st.importJSON({ items: [Object.assign({}, VALID_ITEM, { purchaseDate: '2026-02-29' })] }, true), /日期/);
+  assert.throws(() => st.importJSON({ items: [Object.assign({}, VALID_ITEM, { events: [{ type: 'open', at: '2026-04-31' }] })] }, true), /日期/);
+  assert.equal(st.listItems().length, 0, '全部拒绝后不写入');
+  // 真实存在的日期（含闰年 2月29日）正常导入
+  const r = st.importJSON({ items: [Object.assign({}, VALID_ITEM, { purchaseDate: '2024-02-29' })] }, true);
+  assert.equal(r.items, 1);
+});
+
+test('加载历史脏数据：不存在的日期改正为当月最后一天（食材购买日期与事件日期）', () => {
+  const b = memBackend();
+  b.setItem('freshkeeper:v1', JSON.stringify({
+    items: [
+      { id: 'i1', name: '菠菜', purchaseDate: '2026-02-30', packageType: 'loose', location: 'fridge',
+        events: [{ type: 'open', at: '2026-04-31' }, { type: 'cook', at: '2026-13-01' }] },
+      { id: 'i2', name: '全坏日期', purchaseDate: '2026-13-40', packageType: 'sealed', location: 'fridge' },
+      { id: 'i3', name: '闰日食材', purchaseDate: '2024-02-29', packageType: 'sealed', location: 'fridge' }
+    ],
+    audit: []
+  }));
+  const st = Storage.createStore(b);
+  const i1 = st.getItem('i1');
+  assert.ok(i1, '购买日期可改正的食材保留');
+  assert.equal(i1.purchaseDate, '2026-02-28', '2月30日 → 2月28日（2026 非闰年）');
+  assert.equal(i1.events.length, 1, '月份越界无法改正的事件跳过');
+  assert.equal(i1.events[0].at, '2026-04-30', '4月31日 → 4月30日');
+  assert.equal(st.getItem('i2'), null, '无法合理改正的购买日期仍按原规则丢弃该条');
+  assert.equal(st.getItem('i3').purchaseDate, '2024-02-29', '真实存在的闰日原样保留');
+});
+
 test('原子性：多条中只有一条非法时全部不写入，已有库存不变', () => {
   const b = memBackend();
   const st = Storage.createStore(b);

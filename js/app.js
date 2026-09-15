@@ -2004,6 +2004,8 @@
     var ids = checkedMealIds();
     if (!name) { toast('请填写计划名称'); return; }
     if (!date) { toast('请选择用餐日期'); return; }
+    // 真实日历校验：2月30日、4月31日 这类不存在的日期不能存
+    if (!FreshEngine.parseISODate(date)) { toast('这个日期在日历上不存在，请重新选择'); return; }
     if (!ids.length) { toast('请至少选择 1 样食材'); return; }
 
     // 饮食冲突：打开解决弹层（可移除冲突食材或确认风险后继续）
@@ -2065,6 +2067,7 @@
     var source = state.mealPresetSource || 'manual';
     var createRes = guard(function () { return store.addMealPlan(fields, source); });
     if (!createRes.ok) return false; // 保存失败：冲突弹层保留，失败提示已弹出
+    if (!createRes.value) { toast('计划名称或用餐日期不合法，未保存'); return false; } // 存储层硬校验拦截
     state.mealPresetSource = null;
     state.mealPresetIds = null;
     closeSheet('sheetMealPlan');
@@ -2115,8 +2118,9 @@
 
     root.innerHTML = rows.map(function (plan) {
       var isDone = plan.status === 'done';
+      // 存储层已保证日期真实存在；此处仍兜底：解析不出就跳过预计状态计算，不崩不误报
       var planDate = FreshEngine.parseISODate(plan.date);
-      var tags = plan.items.map(function (pi) { return mealItemTag(pi, planDate, !isDone); }).join('');
+      var tags = plan.items.map(function (pi) { return mealItemTag(pi, planDate, !isDone && !!planDate); }).join('');
       // 就餐成员名（成员被删除时只显示姓名快照）
       var memberHtml = (plan.members && plan.members.length)
         ? '<div class="meal-members">🍽️ 就餐：' + plan.members.map(function (mb) {
@@ -2134,7 +2138,7 @@
           '</div>'
         : '';
       var hints = [];
-      if (!isDone) {
+      if (!isDone && planDate) {
         if (FreshEngine.daysBetween(FreshEngine.todayAt(), planDate) < 0) {
           hints.push({ icon: '🟠', text: '用餐日已过，可补记完成或删除该计划' });
         }

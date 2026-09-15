@@ -26,11 +26,15 @@
   function daysBetween(a, b) {
     return Math.round((dateOnly(b).getTime() - dateOnly(a).getTime()) / MS_DAY);
   }
-  function parseISODate(s) { // 'YYYY-MM-DD' -> Date(中午)
+  function parseISODate(s) { // 'YYYY-MM-DD' -> Date(中午)；不存在的日期（如 2月30日）返回 null
     if (!s) return null;
     var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
     if (!m) return dateOnly(s);
-    return new Date(+m[1], +m[2] - 1, +m[3], 12, 0, 0, 0);
+    var d = new Date(+m[1], +m[2] - 1, +m[3], 12, 0, 0, 0);
+    // Date 构造会把 2月30日 这类不存在的日期溢出成下个月某天，回读年月日识破，
+    // 否则引擎会按“另一天”计算预计状态，与用户填的日期对不上
+    if (d.getFullYear() !== +m[1] || d.getMonth() !== +m[2] - 1 || d.getDate() !== +m[3]) return null;
+    return d;
   }
   function isoDate(d) {
     var x = dateOnly(d);
@@ -110,7 +114,7 @@
     var cat = categoryOf(item);
     var loc = item.location || 'fridge';
     var pkg = item.packageType || 'sealed';
-    var start = parseISODate(item.purchaseDate);
+    var start = parseISODate(item.purchaseDate) || todayAt(); // 非法购入日期兜底按今天（存储层已保证不会发生）
     var safe = safeDaysFor(cat, loc, pkg);
     var isFrozen = loc === 'freezer';
     // 冷冻室内“安全时钟暂停”：购入即冷冻的，按解冻规则赋予解冻余额

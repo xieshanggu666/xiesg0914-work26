@@ -56,8 +56,8 @@ npm start                 # 然后浏览器访问 http://localhost:8080
 ## 测试
 
 ```bash
-npm test                 # 146 个决策引擎/导入/家庭采购/用餐计划/饮食偏好/常备预警/存储写满回滚单元测试
-npm run test:e2e         # 209 个端到端界面断言（jsdom 模拟真实点击流程）
+npm test                 # 153 个决策引擎/导入/家庭采购/用餐计划/饮食偏好/常备预警/存储写满回滚单元测试
+npm run test:e2e         # 213 个端到端界面断言（jsdom 模拟真实点击流程）
 npm run test:storage-full # 51 个“保存失败→分类提示→导出/清理/退出无痕→重试”端到端断言
 ```
 

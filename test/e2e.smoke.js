@@ -435,6 +435,24 @@ function check(name, cond) {
   check('计划按日期排列并显示相对日期', /5 天后/.test($('#mealPlanList').textContent));
   check('底部导航出现计划角标', !$('#mealBadge').hidden && $('#mealBadge').textContent === '1');
 
+  // 9c-1b. 不存在的日期（2月30日）不能保存：日期控件/表单/存储层三重拦截
+  $('#btnAddMealPlan').click();
+  $('#mName').value = '不存在的日期';
+  $('#mDate').value = '2026-02-30'; // 日期控件按规范清空非法值 → 表单读到空
+  fire($('#mDate'), 'change');
+  const badDateCb = $$('#mPickList input[type=checkbox]')[0];
+  badDateCb.checked = true;
+  fire(badDateCb, 'change');
+  fire($('#mealPlanForm'), 'submit');
+  check('不存在的日期被表单拦截（弹层保留）', $('#sheetMealPlan').hidden === false);
+  check('非法日期未存成计划', window.__store.listMealPlans('pending').length === 1);
+  check('给出日期相关提示', /日期/.test($('#toast').textContent));
+  check('存储层同样拒绝绕过表单的不存在日期',
+    window.__store.addMealPlan({ name: '绕过表单', date: '2026-02-30', items: [] }) === null &&
+    window.__store.addMealPlan({ name: '绕过表单2', date: '2026-04-31', items: [] }) === null &&
+    window.__store.listMealPlans('pending').length === 1);
+  $('#sheetMealPlan').hidden = true; // 关掉弹层继续后续流程
+
   // 9c-2. 从方案页一键带入：方案名作计划名、方案食材预勾选
   $$('.tab[data-view]').find(t => t.dataset.view === 'plan').click();
   const mealBtn = $('#planList [data-meal]');

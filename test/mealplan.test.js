@@ -275,6 +275,68 @@ test('编辑计划：冲突确认快照可更新，无冲突时清除', () => {
   assert.ok(entry, '清除快照也入审计');
 });
 
+// ---------- 日期真实日历校验（2月30日/4月31日 这类不存在的日期） ----------
+test('引擎：parseISODate 对不存在的日期返回 null，不再溢出成下个月', () => {
+  assert.equal(Engine.parseISODate('2026-02-30'), null, '2月30日不存在');
+  assert.equal(Engine.parseISODate('2026-04-31'), null, '4月31日不存在');
+  assert.equal(Engine.parseISODate('2026-02-29'), null, '2026 非闰年没有 2月29日');
+  assert.equal(Engine.parseISODate('2026-13-01'), null, '13 月不存在');
+  const leap = Engine.parseISODate('2024-02-29');
+  assert.ok(leap && leap.getMonth() === 1 && leap.getDate() === 29, '2024 闰年 2月29日 正常解析');
+  const d = Engine.parseISODate('2026-09-15');
+  assert.equal(d.getMonth() + 1, 9, '合法日期行为不变');
+  assert.equal(d.getDate(), 15);
+});
+
+test('创建计划：不存在的日期与空名称拒绝入库', () => {
+  const st = Storage.createStore(memBackend());
+  const it = st.addItem(SPINACH);
+  assert.equal(st.addMealPlan({ name: '坏日期', date: '2026-02-30', items: [{ id: it.id, name: it.name }] }), null);
+  assert.equal(st.addMealPlan({ name: '坏日期2', date: '2026-04-31', items: [] }), null);
+  assert.equal(st.addMealPlan({ name: '平年闰日', date: '2026-02-29', items: [] }), null);
+  assert.equal(st.addMealPlan({ name: '  ', date: D(1), items: [] }), null, '空名称同样拒绝');
+  assert.equal(st.listMealPlans().length, 0, '非法计划不入库');
+  assert.equal(st.auditEntries().some(e => e.action === 'mealplan.add'), false, '拒绝时不写流水');
+  assert.ok(st.addMealPlan({ name: '闰年', date: '2024-02-29', items: [] }), '2024 是闰年，2月29日合法');
+});
+
+test('编辑计划：不存在的日期拒绝，原计划不变', () => {
+  const st = Storage.createStore(memBackend());
+  const it = st.addItem(SPINACH);
+  const plan = st.addMealPlan({ name: '正常', date: D(1), items: [{ id: it.id, name: it.name }] });
+  assert.equal(st.updateMealPlan(plan.id, { date: '2026-02-30' }), null);
+  assert.equal(st.updateMealPlan(plan.id, { date: '2026-04-31' }), null);
+  assert.equal(st.getMealPlan(plan.id).date, D(1), '日期保持原值');
+  assert.ok(st.updateMealPlan(plan.id, { date: '2024-02-29' }), '真实存在的闰日可以改');
+  assert.equal(st.getMealPlan(plan.id).date, '2024-02-29');
+});
+
+test('导入严格模式：不存在的用餐日期整体拒绝', () => {
+  const st = Storage.createStore(memBackend());
+  assert.throws(() => st.importJSON({ items: [], mealPlans: [{ name: '坏日期', date: '2026-02-30', items: [] }] }, true), /日期/);
+  assert.throws(() => st.importJSON({ items: [], mealPlans: [{ name: '平年闰日', date: '2026-02-29', items: [] }] }, true), /日期/);
+  assert.equal(st.listMealPlans().length, 0, '拒绝后不写入');
+});
+
+test('加载历史脏数据：不存在的用餐日期改正为当月最后一天', () => {
+  const b = memBackend();
+  b.setItem('freshkeeper:v1', JSON.stringify({
+    items: [],
+    mealPlans: [
+      { id: 'm1', name: '2月30日的计划', date: '2026-02-30', items: [], status: 'pending' },
+      { id: 'm2', name: '4月31日的计划', date: '2026-04-31', items: [], status: 'pending' },
+      { id: 'm3', name: '13月的计划', date: '2026-13-01', items: [], status: 'pending' },
+      { id: 'm4', name: '闰年2月29日', date: '2024-02-29', items: [], status: 'pending' }
+    ],
+    audit: []
+  }));
+  const st = Storage.createStore(b);
+  assert.equal(st.getMealPlan('m1').date, '2026-02-28', '2月30日 → 2月28日（2026 非闰年）');
+  assert.equal(st.getMealPlan('m2').date, '2026-04-30', '4月31日 → 4月30日');
+  assert.equal(st.getMealPlan('m3'), null, '月份越界无法合理改正，跳过该计划');
+  assert.equal(st.getMealPlan('m4').date, '2024-02-29', '真实存在的闰日原样保留');
+});
+
 // ---------- 导入导出 / 迁移 ----------
 test('用餐计划随导出/合并导入往返；重复 ID 拒绝合并', () => {
   const st = Storage.createStore(memBackend());
